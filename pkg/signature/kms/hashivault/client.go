@@ -51,6 +51,7 @@ type hashivaultClient struct {
 	transitSecretEnginePath string
 	keyCache                *ttlcache.Cache[string, crypto.PublicKey]
 	keyVersion              uint64
+	tokenLifetimeWatcher    *vault.LifetimeWatcher
 }
 
 var (
@@ -112,23 +113,21 @@ func newHashivaultClient(address, token, transitSecretEnginePath, keyResourceID 
 		return nil, fmt.Errorf("new vault client: %w", err)
 	}
 
-	if token == "" {
-		token = os.Getenv("VAULT_TOKEN")
-	}
-	if token == "" {
-		log.Printf("VAULT_TOKEN is not set, trying to read token from file at path ~/.vault-token")
-		homeDir, err := homedir.Dir()
-		if err != nil {
-			return nil, fmt.Errorf("get home directory: %w", err)
-		}
+	roleId := os.Getenv("VAULT_ROLE_ID")
+	secretID := os.Getenv("VAULT_SECRET_ID")
 
-		tokenFromFile, err := os.ReadFile(filepath.Join(homeDir, ".vault-token"))
+	if roleId != "" && secretID != "" {
+		token, err = deckhouseAuth(client, roleId, secretID)
 		if err != nil {
-			return nil, fmt.Errorf("read .vault-token file: %w", err)
+			return nil, fmt.Errorf("deckhouse auth: %w", err)
 		}
-
-		token = string(tokenFromFile)
+	} else {
+		token, err = sigstoreAuth(token)
+		if err != nil {
+			return nil, fmt.Errorf("sigstore auth: %w", err)
+		}
 	}
+
 	client.SetToken(token)
 
 	if transitSecretEnginePath == "" {
@@ -149,6 +148,52 @@ func newHashivaultClient(address, token, transitSecretEnginePath, keyResourceID 
 	}
 
 	return hvClient, nil
+}
+
+func deckhouseAuth(client *vault.Client, roleID, secretID string) (string, error) {
+	fullpath := "auth/ar/login"
+
+	loginData := map[string]interface{}{
+		"role_id":   roleID,
+		"secret_id": secretID,
+	}
+
+	resp, err := client.Logical().Write(fullpath, loginData)
+	if err != nil {
+		return "", fmt.Errorf("vault oidc login: %w", err)
+	}
+
+	// Implementation plan
+	// + 0. Configure server-side permissions to allow tokens look up and renew
+	// 1. Remove ttlcache due to redundancy
+	// 2. Look up the token using analog of CLI "vault token lookup <your token>"
+
+	//client.Auth().Token().RenewSelf() or 	client.NewLifetimeWatcher()
+
+	return resp.TokenID()
+}
+
+func sigstoreAuth(token string) (string, error) {
+	if token == "" {
+		token = os.Getenv("VAULT_TOKEN")
+	}
+
+	if token == "" {
+		log.Printf("VAULT_TOKEN is not set, trying to read token from file at path ~/.vault-token")
+		homeDir, err := homedir.Dir()
+		if err != nil {
+			return "", fmt.Errorf("get home directory: %w", err)
+		}
+
+		tokenFromFile, err := os.ReadFile(filepath.Join(homeDir, ".vault-token"))
+		if err != nil {
+			return "", fmt.Errorf("read .vault-token file: %w", err)
+		}
+
+		token = string(tokenFromFile)
+	}
+
+	return token, nil
 }
 
 func oidcLogin(_ context.Context, address, path, role, token string) (string, error) {
