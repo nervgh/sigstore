@@ -52,7 +52,6 @@ type hashivaultClient struct {
 	keyCache                *ttlcache.Cache[string, crypto.PublicKey]
 	keyVersion              uint64
 	tokenTTL                time.Duration
-	tokenLifetimeWatcher    *vault.LifetimeWatcher
 }
 
 var (
@@ -170,16 +169,21 @@ func deckhouseAuth(client *vault.Client, roleID, secretID string) (string, time.
 
 	tokenID, err := resp.TokenID()
 	if err != nil {
-		return "", 0, fmt.Errorf("getting token id: %w", err)
+		return "", 0, fmt.Errorf("getting auth token id: %w", err)
 	}
 	tokenTTL, err := resp.TokenTTL()
 	if err != nil {
-		return "", 0, fmt.Errorf("getting token TTL: %w", err)
+		return "", 0, fmt.Errorf("getting auth token TTL: %w", err)
 	}
 
-	//watcher, err := client.NewLifetimeWatcher(&vault.LifetimeWatcherInput{
-	//	Secret: resp,
-	//})
+	watcher, err := client.NewLifetimeWatcher(&vault.LifetimeWatcherInput{
+		Secret: resp,
+	})
+	if err != nil {
+		return "", 0, fmt.Errorf("vault auth watcher: %w", err)
+	}
+	go watcher.Start()
+	// watcher.Stop() when?
 
 	return tokenID, tokenTTL, nil
 }
