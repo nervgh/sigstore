@@ -182,10 +182,34 @@ func deckhouseAuth(client *vault.Client, roleID, secretID string) (string, time.
 	if err != nil {
 		return "", 0, fmt.Errorf("vault auth watcher: %w", err)
 	}
-	go watcher.Start()
-	// watcher.Stop() when?
+
+	go renewAuthTokenInfinitely(client, watcher)
 
 	return tokenID, tokenTTL, nil
+}
+
+// renewAuthTokenInfinitely renews the auth token indefinitely
+// Docs: https://pkg.go.dev/github.com/hashicorp/vault/api#LifetimeWatcher
+func renewAuthTokenInfinitely(client *vault.Client, watcher *vault.LifetimeWatcher) {
+	go watcher.Start()
+
+	// IMPORTANT NOTE
+	// We don't handle the case when renewal fails (via `err := <-watcher.DoneCh()`). Documentation says:
+	// 	`DoneCh` will return if renewal fails,
+	// 	or if the remaining lease duration is under a built-in threshold and either renewing is not extending it
+	// 	or renewing is disabled.
+	// 	In both cases, the caller should attempt a re-read of the secret.
+	// 	https://pkg.go.dev/github.com/hashicorp/vault/api#LifetimeWatcher
+
+	for renewal := range watcher.RenewCh() {
+		tokenID, err := renewal.Secret.TokenID()
+		if err != nil {
+			log.Printf(fmt.Sprintf("getting tokenID from secret: %v", err))
+			continue // try renewal token again
+		}
+
+		client.SetToken(tokenID)
+	}
 }
 
 func sigstoreAuth(token string) (string, time.Duration, error) {
