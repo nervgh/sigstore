@@ -124,6 +124,8 @@ func newHashivaultClient(address, token, transitSecretEnginePath, keyResourceID 
 		if err != nil {
 			return nil, fmt.Errorf("deckhouse auth: %w", err)
 		}
+
+		go actualizeAuthTokenInfinitely(client, roleId, secretID, tokenTTL)
 	} else {
 		tokenID, tokenTTL, err = sigstoreAuth(token)
 		if err != nil {
@@ -176,38 +178,20 @@ func deckhouseAuth(client *vault.Client, roleID, secretID string) (string, time.
 		return "", 0, fmt.Errorf("getting auth token TTL: %w", err)
 	}
 
-	watcher, err := client.NewLifetimeWatcher(&vault.LifetimeWatcherInput{
-		Secret: resp,
-	})
-	if err != nil {
-		return "", 0, fmt.Errorf("vault auth watcher: %w", err)
-	}
-
-	go renewAuthTokenInfinitely(client, watcher)
-
 	return tokenID, tokenTTL, nil
 }
 
-// renewAuthTokenInfinitely renews the auth token indefinitely
-// Docs: https://pkg.go.dev/github.com/hashicorp/vault/api#LifetimeWatcher
-func renewAuthTokenInfinitely(client *vault.Client, watcher *vault.LifetimeWatcher) {
-	go watcher.Start()
+func actualizeAuthTokenInfinitely(client *vault.Client, roleID, secretID string, tokenTTL time.Duration) {
+	interval := time.Duration(tokenTTL.Nanoseconds() / 100 * 75) // 3/4 of the ttl
+	ticker := time.NewTicker(interval)
 
-	// IMPORTANT NOTE
-	// We don't handle the case when renewal fails (via `err := <-watcher.DoneCh()`). Documentation says:
-	// 	`DoneCh` will return if renewal fails,
-	// 	or if the remaining lease duration is under a built-in threshold and either renewing is not extending it
-	// 	or renewing is disabled.
-	// 	In both cases, the caller should attempt a re-read of the secret.
-	// 	https://pkg.go.dev/github.com/hashicorp/vault/api#LifetimeWatcher
-
-	for renewal := range watcher.RenewCh() {
-		tokenID, err := renewal.Secret.TokenID()
+	for _ = range ticker.C {
+		tokenID, _, err := deckhouseAuth(client, roleID, secretID)
 		if err != nil {
-			log.Printf(fmt.Sprintf("getting tokenID from secret: %v", err))
-			continue // try renewal token again
+			log.Printf("actualization of auth token via dechouse auth: %v", err)
+			continue
 		}
-
+		// assume token ttl is not changed
 		client.SetToken(tokenID)
 	}
 }
